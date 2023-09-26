@@ -68,7 +68,7 @@ if not RunService:IsStudio() then
 		
 		return DataStoreTable
 	end
-else
+else -- Add option to save
 	local Nullary = function() 
 		return nil 
 	end
@@ -76,11 +76,11 @@ else
 	function Module.new(Name)
 		local DataStoreTable = {}
 		DataStoreTable.DataStore = DataStoreService:GetDataStore(Name)
-		DataStoreTable.Name = Name
+		DataStoreTable.Name = nil
 
-		DataStoreTable.Get = GetData
-		DataStoreTable.Set = SetData
-		DataStoreTable.Update = UpdateData
+		DataStoreTable.Get = Nullary
+		DataStoreTable.Set = Nullary
+		DataStoreTable.Update = Nullary
 
 		return DataStoreTable
 	end
