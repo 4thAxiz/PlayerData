@@ -16,7 +16,7 @@ local DataChangedRemote = script:WaitForChild("DataChanged")
 
 function Module.GetData(Player) -- Accepts a Name or a Player, Or UserID
 	Player = (type(Player) == "string" and game.Players[Player]) or (type(Player) == "number" and game.Players:GetPlayerByUserId(Player))
-	
+
 	if type(Player) == "userdata" and Player:IsA("Player") then
 		while Module.PlayerData[Player] == nil do task.wait() end
 		return Module.PlayerData[Player]
@@ -36,12 +36,62 @@ if RunService:IsServer() then--
 	local DataVersion = 1
 	local PlayerCount = 0
 	Module.Tainted = {} -- Player = true -- This is true if a player's data couldn't load. Don't save, and don't sell this player anything
-	
-	local function TaintedDataHandlerRetryCallback(Player)
-		Module.Tainted[Player] = true
-		return function() return  game.Players:FindFirstChild(Player) == nil end -- (Keeps retrying until)
+
+
+	local function DeserializeCyclicStringTable(StringTable, TablesEvaluted) -- Also unseralizes non-cyclic tables
+		TablesEvaluted = TablesEvaluted or {}
+		local DeserializedTable = {}
+		local Key, Value, StartPosition, EndPosition, Character
+
+		while #StringTable > 0 do
+			StartPosition = string.find(StringTable, "%[") 
+			EndPosition = string.find(StringTable,"%]=" ) 
+			if StartPosition and EndPosition then
+				Key = string.sub(StringTable, StartPosition+1, EndPosition-1) 
+			else
+				break
+			end
+
+			Character = string.sub(StringTable, EndPosition+2, EndPosition+2)
+			if Character == "\"" then
+				StartPosition = EndPosition + 3
+				EndPosition = string.find(StringTable, "\"", StartPosition)
+				Value = string.sub(StringTable, StartPosition, EndPosition-1)
+			elseif Character == "{" then
+				StartPosition = EndPosition + 2
+				local count = 1
+				for i = StartPosition, #StringTable do
+					if string.sub(StringTable, i, i) == "{" then
+						count = count + 1
+					elseif string.sub(StringTable, i, i) == "}" then
+						count = count - 1
+					end
+
+					if count == 0 then
+						EndPosition = i
+						break
+					end
+				end
+				local InnerKeyString = string.sub(StringTable, StartPosition, EndPosition)
+				Value = TablesEvaluted[InnerKeyString] or DeserializeCyclicStringTable("{" .. InnerKeyString .. "}", TablesEvaluted)
+				TablesEvaluted[InnerKeyString] = Value
+			else
+				StartPosition = EndPosition + 2
+				EndPosition = string.find(StringTable, ",", StartPosition) 
+				if EndPosition then
+					Value = string.sub(StringTable, StartPosition, EndPosition-1)
+				else
+					Value = string.sub(StringTable, StartPosition)
+				end
+			end
+
+			DeserializedTable[Key] = Value
+			StringTable = string.sub(StringTable, EndPosition+1)
+		end
+
+		return DeserializedTable
 	end
-	
+
 	local function MakeDeserializable(Type)
 		if type(Type) == "table" then
 			if Type.X ~= nil and Type.Y ~= nil and Type.Z ~= nil then
@@ -49,6 +99,8 @@ if RunService:IsServer() then--
 			elseif Type.Position ~= nil and Type.EulerAngleRepresentation ~= nil then
 				local EulerAngles = MakeDeserializable(Type.EulerAngleRepresentation)
 				return CFrame.fromOrientation(EulerAngles.X, EulerAngles.Y, EulerAngles.Z)+MakeDeserializable(Type.Position)
+			elseif type(Type[1]) == "string" and string.match(Type[1], "^{.-}$") then -- Cyclic Table
+				DeserializeCyclicStringTable(Type[1])
 			else
 				return Type -- Should be sanitized
 			end
@@ -56,7 +108,7 @@ if RunService:IsServer() then--
 			return Type
 		end
 	end
-	
+
 	local function MakeLoadable(Table)
 		local Savable = {}
 		for Index, Pair in Table do
@@ -73,6 +125,11 @@ if RunService:IsServer() then--
 		end
 
 		return Savable
+	end
+	
+	local function TaintedDataHandlerRetryCallback(Player)
+		Module.Tainted[Player] = true
+		return function() return  game.Players:FindFirstChild(Player) == nil end -- (Keeps retrying until)
 	end
 	
 	function Module.LoadData(Player)
@@ -109,41 +166,69 @@ if RunService:IsServer() then--
 			warn("Something went wrong on Roblox's end... Could not load PlayerData for:", Player)
 			Module.Tainted[Player] = true
 		end
-		
+
 		Data.EXP += 1 -- Testing
 		return Data
 	end
-	
-	local function MakeSerializeable(Type) -- All that it should support right now
+
+	local function MakeSerializeable(Type, CyclicEvaluted) -- All that it should support right now
 		if typeof(Type) == "Vector3" then
 			return {X = Type.X, Y = Type.Y, Z = Type.Z} -- TODO: Add bitpacking
 		elseif typeof(Type) == "CFrame" then
 			local Position = Type.Position
 			local EulerAngleRepresentation = Vector3.new(Type:ToEulerAnglesXYZ())
-			return {Position = MakeSerializeable(Type), EulerAngleRepresentation = MakeSerializeable(Type),}	
-		else -- No support for this type
+			return {Position = MakeSerializeable(Type), EulerAngleRepresentation = MakeSerializeable(Type),}
+		elseif type(Type) == "table" and CyclicEvaluted ~= nil then -- Cyclic table type
+			CyclicEvaluted = CyclicEvaluted or {}
+
+			local SerializedCyclicTable = "{"
+			for Key, Pair in Type do
+				SerializedCyclicTable = SerializedCyclicTable.."[" .. tostring(Key) .. "]="
+				if type(Pair) == "table" then
+					if CyclicEvaluted[Pair] then
+						SerializedCyclicTable = SerializedCyclicTable.."<cyclic>,"
+					else
+						CyclicEvaluted[Pair] = true
+						SerializedCyclicTable = SerializedCyclicTable..MakeSerializeable(Pair, CyclicEvaluted)..","
+					end
+				elseif type(Pair) == "number" or type(Pair) == "boolean" then
+					SerializedCyclicTable = SerializedCyclicTable..tostring(Pair) .. ","
+				else
+					SerializedCyclicTable = SerializedCyclicTable.."\""..tostring(Pair).."\","
+				end
+			end
+
+			return SerializedCyclicTable .. "}"
+		else -- No support for this type, fine as is
 			return Type
 		end
 	end
-	
-	local function MakeSavable(Table)
+
+	local function MakeSavable(Table, TablesEvaluated)
+		TablesEvaluated = TablesEvaluated or {}
+		if TablesEvaluated[Table] then
+			warn("Cyclic Reference Detected In Data Table. Attempting to serialize: ", Table, debug.traceback())
+			return { MakeSerializeable(Table, "CyclicTable") }
+		end
+
 		local Savable = {}
 		for Index, Pair in Table do
-			Savable[Index] = MakeSerializeable(Index)
-			Savable[Pair] = MakeSerializeable(Pair)
-			
+			Savable[MakeSerializeable(Index)] = Savable[MakeSerializeable(Pair)]
+			--Savable[Index] = MakeSerializeable(Index)
+			--Savable[Pair] = MakeSerializeable(Pair)
+
 			if type(Pair) == "table" then
-				Savable[Index] = MakeSavable(Pair)
+				Savable[Index] = MakeSavable(Pair, TablesEvaluated)
 			elseif type(Index) == "table" then
-				Savable[Pair] = MakeSavable(Index)
+				Savable[Pair] = MakeSavable(Index, TablesEvaluated)
 			else
 				Savable[Index] = Pair
 			end
 		end
-
+		TablesEvaluated[Table] = true
 		return Savable
 	end
-	
+
 	function Module.SaveData(Player, SessionEnd)
 		local PlayerData = Module.PlayerData[Player]
 		if PlayerData and Module.Tainted[Player] == nil then
@@ -164,7 +249,7 @@ if RunService:IsServer() then--
 					end
 				end
 			end
-			
+
 			local Success = PlayerDataStore:Set(Player.UserId, MakeSavable(PlayerData))
 			if Success then
 				return Success
@@ -173,58 +258,58 @@ if RunService:IsServer() then--
 			end
 		else
 			warn("Cannot save", Player, "data. Tainted Data...")
-			
+
 		end
-		
+
 		return false
 	end
-	
-	local function FilterForNetworking(Table, Filter)
-		if Filter ~= "table" then -- key/pair filter -> pair/key
+
+	local function FilterForNetworking(Table, Filter, FilteredTable)		
+		if type(Filter) ~= "table" then -- key/pair filter -> pair/key
 			for Key, Pair in Table do
 				if Key == Filter then
-					return Pair, Key 
+					return {[Pair] = Key}
 				elseif Pair == Filter then
-					return Key, Pair 
+					return {[Key] = Pair}
 				else
 					if type(Key) == "table" then
 						local LinkedPair, LinkedKey = FilterForNetworking(Key, Filter)
 						if LinkedPair then
-							return LinkedPair, LinkedKey
+							return {[LinkedPair] = LinkedKey}
 						end
 					end
 
 					if type(Pair) == "table" then
 						local LinkedPair, LinkedKey = FilterForNetworking(Pair, Filter)
 						if LinkedPair then
-							return LinkedPair, LinkedKey
+							return {[LinkedPair] = LinkedKey}
 						end
 					end
 				end
 			end
 		else
-			for FilterKey, FilterValue in Filter do
-				if FilterKey then
-					if FilterValue == nil then -- key/pair filter -> pair/key
-						return FilterForNetworking(Table, FilterKey)
-					else -- Key-pair filter
-						for TableIndex, TableValue in Table do
-							if TableIndex == FilterKey and TableValue == FilterValue then
-								return TableIndex, TableValue
-							elseif type(TableIndex) == "table" and FilterForNetworking(TableIndex, FilterKey, FilterValue) or (type(TableValue) == "table" and FilterForNetworking(TableValue, FilterKey, FilterValue)) then
-								return TableIndex, TableValue
-							end
+			FilteredTable = FilteredTable or {}
+			for FilterKey, FilterValue in Filter do -- Accounts for mixed tables
+				if FilterKey == nil then -- key/pair filter -> pair/key
+					FilteredTable[FilterValue] = FilterForNetworking(Table, FilterValue, FilteredTable)
+				else -- Key-pair filter
+					for TableIndex, TableValue in Table do
+						if TableIndex == FilterKey and TableValue == FilterValue then
+							FilteredTable[TableIndex] = TableValue
+							continue
+						elseif type(TableIndex) == "table" and FilterForNetworking(FilterKey, FilterValue, FilteredTable) or (type(TableValue) == "table" and FilterForNetworking(FilterKey, FilterValue, FilteredTable)) then
+							FilteredTable[TableIndex] = TableValue
 						end
 					end
 				end
 			end
 		end
 	end
-	
+
 	local function MakeNetworkable(Table)
 		local NewTable = {}
 		local Meta = getmetatable(Table)
-		
+
 		for Index,Value in Meta do
 			if type(Index) == "number" then
 				Index = tostring(Index)
@@ -239,16 +324,15 @@ if RunService:IsServer() then--
 		end
 		return NewTable
 	end
-	
+
 	function Module.ReplicateData(Player, Filter, Recipients)
-		print(Player)
 		local PlayerData = type(Player) == "table" and Player or Module.GetData(Player)
 		if type(next(Filter)) == "userdata" then
 			return warn("Did you accidentally send a list of player recipients in place of Filter? If you don't need a filter, mark this argument as nil.")
 		end
-		
+
 		local NetworkableData = MakeNetworkable({[Player] = Filter and FilterForNetworking(PlayerData, Filter) or PlayerData}) -- Player should be replicated to the client at this point
-		
+
 		if Recipients == nil or type(Recipients) == "userdata" then
 			DataChangedRemote:FireClient(Player, NetworkableData)
 		elseif type(Recipients) == "string" and string.lower(Recipients) == "fireall" then
@@ -265,17 +349,17 @@ if RunService:IsServer() then--
 			warn("Invalid Recipient type to send data to", Recipients, debug.traceback())
 		end
 	end
-	
+
 	-- 
 	local function PlayerAdded(Player)
 		if not RunService:IsStudio() then task.wait(5) end -- Delay for the ~4s DataStore cache delay (Prevents data exploitation via rapid server-changes)
 		PlayerCount = PlayerCount + 1
-		
+
 		local Data = Module.LoadData(Player)
 		Module.PlayerData[Player] = Data
 		Module.ReplicateData(Player, Data)
 	end
-	
+
 	game.Players.PlayerRemoving:Connect(function(Player)
 		Module.SaveData(Player, true)
 		Module.PlayerData[Player] = nil
@@ -286,7 +370,7 @@ if RunService:IsServer() then--
 	for _,Player in game.Players:GetPlayers() do
 		task.defer(PlayerAdded, Player)
 	end
-	
+
 	if not RunService:IsStudio() then
 		game:BindToClose(function()
 			for Player,DataOfPlayer in Module.PlayerData do
@@ -331,7 +415,7 @@ elseif RunService:IsClient() then --
 		end
 		return NewTable
 	end
-	
+
 	DataChangedRemote.OnClientEvent:Connect(function(RecievedData)
 		for Player, PlayerData in ReceiveNetworkable(RecievedData) do --- {[Player] = PlayerData}
 			Module.PlayerData[Player] = PlayerData
