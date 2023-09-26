@@ -112,8 +112,9 @@ if RunService:IsServer() then--
 	local function MakeLoadable(Table)
 		local Savable = {}
 		for Index, Pair in Table do
-			Savable[Index] = MakeDeserializable(Index)
-			Savable[Pair] = MakeDeserializable(Pair)
+			Savable[MakeDeserializable(Index)] = Savable[MakeDeserializable(Pair)]
+			--Savable[Index] = MakeDeserializable(Index)
+			--Savable[Pair] = MakeDeserializable(Pair)
 
 			if type(Pair) == "table" then
 				Savable[Index] = MakeLoadable(Pair)
